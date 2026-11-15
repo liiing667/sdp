@@ -370,8 +370,9 @@ func (s *SessionDescription) GetPayloadTypeForCodec(wanted Codec) (uint8, error)
 type stateFn func(*lexer) (stateFn, error)
 
 type lexer struct {
-	desc  *SessionDescription
-	cache *unmarshalCache
+	desc          *SessionDescription
+	cache         *unmarshalCache
+	numAttributes int
 	baseLexer
 }
 
@@ -390,4 +391,19 @@ func (l *lexer) handleType(fn keyToState) (stateFn, error) {
 	}
 
 	return nil, l.syntaxError()
+}
+
+func (l *lexer) duplicateFieldError(field string) error {
+	return fmt.Errorf("%w at line %d: %s", errSDPDuplicateField, l.line(), field)
+}
+
+// accountAttribute enforces the budget on the total number of session and
+// media attributes in a description.
+func (l *lexer) accountAttribute() error {
+	l.numAttributes++
+	if l.numAttributes > maxAttributes {
+		return fmt.Errorf("%w at line %d: limit is %d", errSDPTooManyAttributes, l.line(), maxAttributes)
+	}
+
+	return nil
 }

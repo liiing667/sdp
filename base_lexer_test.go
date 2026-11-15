@@ -6,6 +6,7 @@ package sdp
 import (
 	"fmt"
 	"io"
+	"math"
 	"runtime"
 	"strings"
 	"testing"
@@ -131,6 +132,38 @@ func TestReadUint64Field_Errors(t *testing.T) {
 		_, err := l.readUint64Field()
 		var se syntaxError
 		assert.ErrorAs(t, err, &se)
+	})
+}
+
+func TestReadUint64Field_Overflow(t *testing.T) {
+	t.Run("max uint64 parses", func(t *testing.T) {
+		l := &baseLexer{value: "18446744073709551615\r\n"}
+		value, err := l.readUint64Field()
+		assert.NoError(t, err)
+		assert.Equal(t, uint64(math.MaxUint64), value)
+	})
+
+	t.Run("overflow by one errors with line number", func(t *testing.T) {
+		l := &baseLexer{value: "18446744073709551616\r\n"}
+		_, err := l.readUint64Field()
+		assert.ErrorIs(t, err, errSDPNumericOverflow)
+		assert.Contains(t, err.Error(), "at line 1")
+	})
+
+	t.Run("overflow on later line reports its line number", func(t *testing.T) {
+		l := &baseLexer{value: "1\n99999999999999999999\r\n"}
+		value, err := l.readUint64Field()
+		assert.NoError(t, err)
+		assert.Equal(t, uint64(1), value)
+
+		// consume the line terminator as readType would
+		ch, err := l.readByte()
+		assert.NoError(t, err)
+		assert.Equal(t, byte('\n'), ch)
+
+		_, err = l.readUint64Field()
+		assert.ErrorIs(t, err, errSDPNumericOverflow)
+		assert.Contains(t, err.Error(), "at line 2")
 	})
 }
 

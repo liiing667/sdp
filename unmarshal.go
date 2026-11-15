@@ -18,6 +18,11 @@ var (
 	errSDPInvalidValue        = errors.New("sdp: invalid value")
 	errSDPInvalidPortValue    = errors.New("sdp: invalid port value")
 	errSDPCacheInvalid        = errors.New("sdp: invalid cache")
+	errSDPNumericOverflow     = errors.New("sdp: numeric value overflows uint64")
+	errSDPDuplicateField      = errors.New("sdp: duplicate singleton field")
+	errSDPLineTooLong         = errors.New("sdp: line too long")
+	errSDPTooManyLines        = errors.New("sdp: too many lines")
+	errSDPTooManyAttributes   = errors.New("sdp: too many attributes")
 
 	//nolint: gochecknoglobals
 	unmarshalCachePool = sync.Pool{
@@ -545,6 +550,10 @@ func unmarshalSessionName(l *lexer) (stateFn, error) {
 }
 
 func unmarshalSessionInformation(l *lexer) (stateFn, error) {
+	if l.desc.SessionInformation != nil {
+		return nil, l.duplicateFieldError("i=")
+	}
+
 	value, err := l.readLine()
 	if err != nil {
 		return nil, err
@@ -557,6 +566,10 @@ func unmarshalSessionInformation(l *lexer) (stateFn, error) {
 }
 
 func unmarshalURI(l *lexer) (stateFn, error) {
+	if l.desc.URI != nil {
+		return nil, l.duplicateFieldError("u=")
+	}
+
 	value, err := l.readLine()
 	if err != nil {
 		return nil, err
@@ -571,6 +584,10 @@ func unmarshalURI(l *lexer) (stateFn, error) {
 }
 
 func unmarshalEmail(l *lexer) (stateFn, error) {
+	if l.desc.EmailAddress != nil {
+		return nil, l.duplicateFieldError("e=")
+	}
+
 	value, err := l.readLine()
 	if err != nil {
 		return nil, err
@@ -583,6 +600,10 @@ func unmarshalEmail(l *lexer) (stateFn, error) {
 }
 
 func unmarshalPhone(l *lexer) (stateFn, error) {
+	if l.desc.PhoneNumber != nil {
+		return nil, l.duplicateFieldError("p=")
+	}
+
 	value, err := l.readLine()
 	if err != nil {
 		return nil, err
@@ -595,6 +616,10 @@ func unmarshalPhone(l *lexer) (stateFn, error) {
 }
 
 func unmarshalSessionConnectionInformation(l *lexer) (stateFn, error) {
+	if l.desc.ConnectionInformation != nil {
+		return nil, l.duplicateFieldError("c=")
+	}
+
 	var err error
 	l.desc.ConnectionInformation, err = l.unmarshalConnectionInformation()
 	if err != nil {
@@ -765,6 +790,10 @@ func unmarshalRepeatTimes(lex *lexer) (stateFn, error) {
 }
 
 func unmarshalTimeZones(lex *lexer) (stateFn, error) {
+	if len(lex.desc.TimeZones) > 0 {
+		return nil, lex.duplicateFieldError("z=")
+	}
+
 	// These fields are transimitted in pairs
 	// z=<adjustment time> <offset> <adjustment time> <offset> ....
 	// so we are making sure that there are actually multiple of 2 total.
@@ -802,6 +831,10 @@ func unmarshalTimeZones(lex *lexer) (stateFn, error) {
 }
 
 func unmarshalSessionEncryptionKey(l *lexer) (stateFn, error) {
+	if l.desc.EncryptionKey != nil {
+		return nil, l.duplicateFieldError("k=")
+	}
+
 	value, err := l.readLine()
 	if err != nil {
 		return nil, err
@@ -814,6 +847,10 @@ func unmarshalSessionEncryptionKey(l *lexer) (stateFn, error) {
 }
 
 func unmarshalSessionAttribute(l *lexer) (stateFn, error) {
+	if err := l.accountAttribute(); err != nil {
+		return nil, err
+	}
+
 	value, err := l.readLine()
 	if err != nil {
 		return nil, err
@@ -977,6 +1014,10 @@ func unmarshalMediaEncryptionKey(l *lexer) (stateFn, error) {
 }
 
 func unmarshalMediaAttribute(l *lexer) (stateFn, error) {
+	if err := l.accountAttribute(); err != nil {
+		return nil, err
+	}
+
 	value, err := l.readLine()
 	if err != nil {
 		return nil, err

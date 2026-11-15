@@ -5,6 +5,9 @@ package sdp
 
 import (
 	"io"
+	"math"
+	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -614,6 +617,125 @@ func TestUnmarshal_DelegatesToUnmarshalString(t *testing.T) {
 	out, err := sd.Marshal()
 	assert.NoError(t, err)
 	assert.Equal(t, string(in), string(out))
+}
+
+func TestUnmarshalOverflowingUint64Field(t *testing.T) {
+	t.Run("origin session-id overflow reports line number", func(t *testing.T) {
+		var sd SessionDescription
+		err := sd.UnmarshalString("v=0\r\n" +
+			"o=jdoe 99999999999999999999 2890842807 IN IP4 10.47.16.5\r\n" +
+			"s=SDP Seminar\r\n" +
+			"t=3034423619 3042462419\r\n")
+		assert.ErrorIs(t, err, errSDPNumericOverflow)
+		assert.Contains(t, err.Error(), "at line 2")
+	})
+
+	t.Run("origin session-version overflow", func(t *testing.T) {
+		var sd SessionDescription
+		err := sd.UnmarshalString("v=0\r\n" +
+			"o=jdoe 2890844526 18446744073709551616 IN IP4 10.47.16.5\r\n" +
+			"s=SDP Seminar\r\n" +
+			"t=3034423619 3042462419\r\n")
+		assert.ErrorIs(t, err, errSDPNumericOverflow)
+	})
+
+	t.Run("timing start overflow", func(t *testing.T) {
+		var sd SessionDescription
+		err := sd.UnmarshalString(BaseSDP + "t=99999999999999999999 3042462419\r\n")
+		assert.ErrorIs(t, err, errSDPNumericOverflow)
+		assert.Contains(t, err.Error(), "at line 4")
+	})
+
+	t.Run("max uint64 values still parse", func(t *testing.T) {
+		var sd SessionDescription
+		err := sd.UnmarshalString("v=0\r\n" +
+			"o=jdoe 18446744073709551615 18446744073709551615 IN IP4 10.47.16.5\r\n" +
+			"s=SDP Seminar\r\n" +
+			"t=18446744073709551615 18446744073709551615\r\n")
+		assert.NoError(t, err)
+		assert.Equal(t, uint64(math.MaxUint64), sd.Origin.SessionID)
+		assert.Equal(t, uint64(math.MaxUint64), sd.Origin.SessionVersion)
+	})
+}
+
+func TestUnmarshalDuplicateSessionSingletons(t *testing.T) {
+	sessionInformation := Information("set")
+	emailAddress := EmailAddress("set")
+	phoneNumber := PhoneNumber("set")
+	encryptionKey := EncryptionKey("set")
+
+	for _, test := range []struct {
+		name  string
+		desc  *SessionDescription
+		state stateFn
+		field string
+	}{
+		{"i=", &SessionDescription{SessionInformation: &sessionInformation}, unmarshalSessionInformation, "i="},
+		{"u=", &SessionDescription{URI: &url.URL{}}, unmarshalURI, "u="},
+		{"e=", &SessionDescription{EmailAddress: &emailAddress}, unmarshalEmail, "e="},
+		{"p=", &SessionDescription{PhoneNumber: &phoneNumber}, unmarshalPhone, "p="},
+		{"c=", &SessionDescription{ConnectionInformation: &ConnectionInformation{}},
+			unmarshalSessionConnectionInformation, "c="},
+		{"k=", &SessionDescription{EncryptionKey: &encryptionKey}, unmarshalSessionEncryptionKey, "k="},
+		{"z=", &SessionDescription{TimeZones: []TimeZone{{}}}, unmarshalTimeZones, "z="},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			l := &lexer{desc: test.desc, baseLexer: baseLexer{value: "x\r\n"}}
+			st, err := test.state(l)
+			assert.Nil(t, st)
+			assert.ErrorIs(t, err, errSDPDuplicateField)
+			assert.Contains(t, err.Error(), test.field)
+		})
+	}
+
+	t.Run("repeated session-level field fails closed", func(t *testing.T) {
+		var sd SessionDescription
+		err := sd.UnmarshalString(BaseSDP +
+			"i=first\r\n" +
+			"i=second\r\n" +
+			"t=3034423619 3042462419\r\n")
+		assert.Error(t, err)
+	})
+}
+
+func TestUnmarshalInputBudgets(t *testing.T) {
+	t.Run("line too long", func(t *testing.T) {
+		var sd SessionDescription
+		err := sd.UnmarshalString("v=0\r\n" +
+			"o=jdoe 2890844526 2890842807 IN IP4 10.47.16.5\r\n" +
+			"s=" + strings.Repeat("a", maxLineLength) + "\r\n")
+		assert.ErrorIs(t, err, errSDPLineTooLong)
+		assert.Contains(t, err.Error(), "at line 3")
+	})
+
+	t.Run("unterminated final line too long", func(t *testing.T) {
+		var sd SessionDescription
+		err := sd.UnmarshalString("v=0\r\n" +
+			"o=jdoe 2890844526 2890842807 IN IP4 10.47.16.5\r\n" +
+			"s=" + strings.Repeat("a", maxLineLength))
+		assert.ErrorIs(t, err, errSDPLineTooLong)
+	})
+
+	t.Run("too many lines", func(t *testing.T) {
+		var sd SessionDescription
+		err := sd.UnmarshalString(BaseSDP +
+			"t=3034423619 3042462419\r\n" +
+			strings.Repeat("\r\n", maxLines))
+		assert.ErrorIs(t, err, errSDPTooManyLines)
+	})
+
+	t.Run("too many attributes", func(t *testing.T) {
+		var sd SessionDescription
+		err := sd.UnmarshalString(BaseSDP +
+			"t=3034423619 3042462419\r\n" +
+			strings.Repeat("a=x\r\n", maxAttributes+1))
+		assert.ErrorIs(t, err, errSDPTooManyAttributes)
+	})
+
+	t.Run("budgets accept a large valid description", func(t *testing.T) {
+		var sd SessionDescription
+		assert.NoError(t, sd.UnmarshalString(largeSDP(200)))
+	})
 }
 
 func TestS1_SyntaxError(t *testing.T) {

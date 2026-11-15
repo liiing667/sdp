@@ -7,12 +7,27 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
 )
 
 var errDocumentStart = errors.New("already on document start")
+
+// Budgets applied while unmarshalling untrusted session descriptions. Any
+// standards-compliant description is orders of magnitude below these limits;
+// they exist to bound the memory and CPU a malformed or hostile description
+// can consume.
+const (
+	// maxLineLength bounds the bytes consumed by a single line.
+	maxLineLength = 1 << 16
+	// maxLines bounds the total number of lines in a description.
+	maxLines = 1 << 15
+	// maxAttributes bounds the total number of session and media
+	// attributes in a description.
+	maxAttributes = 1 << 14
+)
 
 type syntaxError struct {
 	s string
@@ -30,9 +45,34 @@ func (e syntaxError) Error() string {
 type baseLexer struct {
 	value string
 	pos   int
+	// lineStart is the offset at which the line currently being consumed
+	// started; numLines counts the lines consumed so far.
+	lineStart int
+	numLines  int
 	// returned strings are copied here so that a retained one pins at most
 	// one small buffer instead of the whole input
 	copies strings.Builder
+}
+
+// line returns the 1-based number of the line currently being parsed.
+// It is only called on error paths.
+func (l *baseLexer) line() int {
+	return strings.Count(l.value[:l.pos], "\n") + 1
+}
+
+// endLine records that the line ending at pos (just past its terminator)
+// has been consumed and enforces the line length and line count budgets.
+func (l *baseLexer) endLine(pos int) error {
+	if pos-l.lineStart > maxLineLength {
+		return fmt.Errorf("%w at line %d: %d bytes", errSDPLineTooLong, l.numLines+1, pos-l.lineStart)
+	}
+	l.lineStart = pos
+	l.numLines++
+	if l.numLines > maxLines {
+		return fmt.Errorf("%w at line %d: limit is %d", errSDPTooManyLines, l.numLines, maxLines)
+	}
+
+	return nil
 }
 
 func (l *baseLexer) copyString(s string) string {
@@ -62,6 +102,13 @@ func (l *baseLexer) unreadByte() error {
 
 func (l *baseLexer) readByte() (byte, error) {
 	if l.pos >= len(l.value) {
+		// Account for a final line that is not newline terminated.
+		if l.pos > l.lineStart {
+			if err := l.endLine(l.pos); err != nil {
+				return byte(0), err
+			}
+		}
+
 		return byte(0), io.EOF
 	}
 	ch := l.value[l.pos]
@@ -78,9 +125,18 @@ func (l *baseLexer) nextLine() error {
 		} else if err != nil {
 			return err
 		}
-		if !isNewline(ch) {
-			return l.unreadByte()
+		if ch == '\n' {
+			if err := l.endLine(l.pos); err != nil {
+				return err
+			}
+
+			continue
 		}
+		if ch == '\r' {
+			continue
+		}
+
+		return l.unreadByte()
 	}
 }
 
@@ -99,6 +155,7 @@ func (l *baseLexer) readWhitespace() error { //notlint:cyclop
 }
 
 func (l *baseLexer) readUint64Field() (i uint64, err error) { //nolint:cyclop
+	start := l.pos
 	for {
 		ch, err := l.readByte()
 		if errors.Is(err, io.EOF) && i > 0 {
@@ -123,30 +180,13 @@ func (l *baseLexer) readUint64Field() (i uint64, err error) { //nolint:cyclop
 			break
 		}
 
-		switch ch {
-		case '0':
-			i *= 10
-		case '1':
-			i = i*10 + 1
-		case '2':
-			i = i*10 + 2
-		case '3':
-			i = i*10 + 3
-		case '4':
-			i = i*10 + 4
-		case '5':
-			i = i*10 + 5
-		case '6':
-			i = i*10 + 6
-		case '7':
-			i = i*10 + 7
-		case '8':
-			i = i*10 + 8
-		case '9':
-			i = i*10 + 9
-		default:
+		if ch < '0' || ch > '9' {
 			return i, l.syntaxError()
 		}
+		if i > (math.MaxUint64-uint64(ch-'0'))/10 {
+			return i, fmt.Errorf("%w at line %d: %s", errSDPNumericOverflow, l.line(), l.value[start:l.pos])
+		}
+		i = i*10 + uint64(ch-'0')
 	}
 
 	return i, nil
@@ -211,6 +251,10 @@ func (l *baseLexer) readLine() (string, error) {
 			trim++
 		}
 		if ch == '\n' {
+			if err := l.endLine(l.pos); err != nil {
+				return "", err
+			}
+
 			return l.copyString(l.value[start : l.pos-trim]), nil
 		}
 	}
@@ -223,7 +267,14 @@ func (l *baseLexer) readType() (byte, error) {
 			return 0, err
 		}
 
-		if isNewline(firstByte) {
+		if firstByte == '\r' {
+			continue
+		}
+		if firstByte == '\n' {
+			if err := l.endLine(l.pos); err != nil {
+				return 0, err
+			}
+
 			continue
 		}
 
